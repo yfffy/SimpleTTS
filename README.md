@@ -2,7 +2,6 @@
 
 A modern web interface for edge-tts (Microsoft Edge's Text-to-Speech engine), featuring both single text conversion and batch processing capabilities.
 
-![SimpleTTS Screenshot](https://i.imgur.com/placeholder.png)
 
 ## Features
 
