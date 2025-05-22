@@ -5,15 +5,28 @@ import tempfile
 import asyncio
 import aiofiles
 import uuid
+import logging
+from datetime import datetime
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, BackgroundTasks
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, validator
 from typing import List, Optional
 import edge_tts
 import shutil
 from pathlib import Path
 from fastapi.staticfiles import StaticFiles
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler(f'tts_{datetime.now().strftime("%Y%m%d")}.log'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
 
 # Download NLTK data if it doesn't exist
 try:
@@ -51,6 +64,36 @@ class TTSRequest(BaseModel):
     volume: Optional[str] = "+0%"
     pitch: Optional[str] = "+0Hz"
 
+    @validator('rate')
+    def validate_rate(cls, v):
+        if not v.endswith('%'):
+            raise ValueError('Rate must end with %')
+        try:
+            int(v[:-1])
+        except ValueError:
+            raise ValueError('Rate must be a valid percentage')
+        return v
+
+    @validator('volume')
+    def validate_volume(cls, v):
+        if not v.endswith('%'):
+            raise ValueError('Volume must end with %')
+        try:
+            int(v[:-1])
+        except ValueError:
+            raise ValueError('Volume must be a valid percentage')
+        return v
+
+    @validator('pitch')
+    def validate_pitch(cls, v):
+        if not v.endswith('Hz'):
+            raise ValueError('Pitch must end with Hz')
+        try:
+            int(v[:-2])
+        except ValueError:
+            raise ValueError('Pitch must be a valid frequency')
+        return v
+
 class BatchProcessRequest(BaseModel):
     file_ids: List[str]
     voice: str
@@ -84,45 +127,61 @@ async def get_voices():
 @app.post("/upload")
 async def upload_file(file: UploadFile = File(...)):
     """Upload a file for processing"""
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="No file provided")
+    
+    # Check file size (limit to 10MB)
+    MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
+    content = await file.read()
+    if len(content) > MAX_FILE_SIZE:
+        raise HTTPException(status_code=400, detail="File too large. Maximum size is 10MB")
+    
     # Generate a unique ID for the file
     file_id = str(uuid.uuid4())
     file_path = UPLOAD_DIR / f"{file_id}_{file.filename}"
     
-    # Save the uploaded file
-    async with aiofiles.open(file_path, 'wb') as out_file:
-        content = await file.read()
-        await out_file.write(content)
-    
-    # Detect encoding and convert to UTF-8 if necessary
-    rawdata = open(file_path, 'rb').read()
-    result = chardet.detect(rawdata)
-    encoding = result['encoding']
-    
-    # Create UTF-8 version of the file
-    with open(file_path, 'rb') as file:
-        content = file.read()
-    
-    # If the file is not UTF-8, convert it
-    if encoding and encoding.lower() != 'utf-8':
-        try:
-            decoded_content = content.decode(encoding)
+    try:
+        # Save the uploaded file
+        async with aiofiles.open(file_path, 'wb') as out_file:
+            await out_file.write(content)
+        
+        logger.info(f"File uploaded successfully: {file.filename}")
+        
+        # Detect encoding and convert to UTF-8 if necessary
+        rawdata = open(file_path, 'rb').read()
+        result = chardet.detect(rawdata)
+        encoding = result['encoding']
+        
+        # Create UTF-8 version of the file
+        with open(file_path, 'rb') as file:
+            content = file.read()
+        
+        # If the file is not UTF-8, convert it
+        if encoding and encoding.lower() != 'utf-8':
+            try:
+                decoded_content = content.decode(encoding)
+                utf8_path = UPLOAD_DIR / f"{file_id}_utf8_{file.filename}"
+                with open(utf8_path, 'w', encoding='utf-8') as utf8_file:
+                    utf8_file.write(decoded_content)
+                logger.info(f"File converted from {encoding} to UTF-8")
+            except Exception as e:
+                logger.error(f"Failed to convert file to UTF-8: {str(e)}", exc_info=True)
+                raise HTTPException(status_code=500, detail=f"Failed to convert file to UTF-8: {str(e)}")
+        else:
+            # File is already UTF-8, just create a copy with the expected name
             utf8_path = UPLOAD_DIR / f"{file_id}_utf8_{file.filename}"
-            with open(utf8_path, 'w', encoding='utf-8') as utf8_file:
-                utf8_file.write(decoded_content)
-        except Exception as e:
-            return {"error": f"Failed to convert file to UTF-8: {str(e)}"}
-    else:
-        # File is already UTF-8, just create a copy with the expected name
-        utf8_path = UPLOAD_DIR / f"{file_id}_utf8_{file.filename}"
-        with open(utf8_path, 'wb') as utf8_file:
-            utf8_file.write(content)
-    
-    return {
-        "file_id": file_id,
-        "filename": file.filename,
-        "original_encoding": encoding,
-        "size": len(content)
-    }
+            with open(utf8_path, 'wb') as utf8_file:
+                utf8_file.write(content)
+        
+        return {
+            "file_id": file_id,
+            "filename": file.filename,
+            "original_encoding": encoding,
+            "size": len(content)
+        }
+    except Exception as e:
+        logger.error(f"File upload failed: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"File upload failed: {str(e)}")
 
 async def process_text_to_speech(text: str, output_file: str, voice: str, rate: str, volume: str, pitch: str):
     """Process text to speech using Edge TTS"""
@@ -136,6 +195,7 @@ async def text_to_speech(request: TTSRequest, background_tasks: BackgroundTasks)
     output_path = OUTPUT_DIR / f"{output_id}.mp3"
     
     try:
+        logger.info(f"Processing TTS request for voice: {request.voice}")
         # Process TTS in the background
         await process_text_to_speech(
             request.text, 
@@ -146,12 +206,14 @@ async def text_to_speech(request: TTSRequest, background_tasks: BackgroundTasks)
             request.pitch
         )
         
+        logger.info(f"Successfully generated audio file: {output_id}.mp3")
         return {
             "success": True,
             "output_id": output_id,
             "output_url": f"/outputs/{output_id}.mp3"
         }
     except Exception as e:
+        logger.error(f"TTS processing failed: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"TTS processing failed: {str(e)}")
 
 @app.post("/batch-process")
