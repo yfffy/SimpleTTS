@@ -7,6 +7,7 @@ import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { isTextFile } from '@/lib/utils';
 import { UploadedFile } from '@/types';
+import { api, APIError } from '@/lib/api';
 
 interface FileUploaderProps {
   onFileUpload: (file: UploadedFile) => void;
@@ -29,24 +30,15 @@ export default function FileUploader({ onFileUpload }: FileUploaderProps) {
       }
 
       try {
-        const formData = new FormData();
-        formData.append('file', file);
-        
-        const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/upload`, {
-          method: 'POST',
-          body: formData,
-        });
-        
-        const data = await response.json();
-        
-        if (response.ok) {
-          onFileUpload(data);
-        } else {
-          setError(data.detail || 'Failed to upload file');
-        }
+        const data = await api.uploadFile(file);
+        onFileUpload(data);
       } catch (error) {
         console.error('Error uploading file:', error);
-        setError('Failed to upload file. Please try again.');
+        if (error instanceof APIError) {
+          setError(error.message);
+        } else {
+          setError('Failed to upload file. Please try again.');
+        }
       }
     }
     
