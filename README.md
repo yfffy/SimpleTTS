@@ -25,7 +25,7 @@ A modern web interface for edge-tts (Microsoft Edge's Text-to-Speech engine), fe
 
 1. Clone the repository:
    ```bash
-   git clone https://github.com/yourusername/simpletts.git
+   git clone https://github.com/yfffy/simpletts.git
    cd simpletts
    ```
 
